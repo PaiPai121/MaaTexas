@@ -5,7 +5,7 @@ MaaTexas 感知模块数据模型。
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -87,3 +87,22 @@ class UIElement(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0, description="识别置信度")
     bbox: tuple[int, int, int, int] = Field(..., description="边界框 (x, y, w, h)")
     text_content: Optional[str] = Field(default=None, description="文本内容")
+
+
+class PerceptionResult(BaseModel):
+    """感知管线处理结果数据契约。
+
+    封装 OpenCV 感知管线的输出结果，包含标注图像和检测到的 UI 元素。
+
+    Attributes:
+        timestamp: 处理时间戳（Unix 时间戳）。
+        annotated_image: 标注后的图像（带 SoM 标记）。
+        ui_elements: 检测到的 UI 元素列表。
+    """
+    timestamp: float = Field(..., description="处理时间戳（Unix 时间戳）")
+    annotated_image: Any = Field(..., description="标注后的图像（numpy 数组）")
+    ui_elements: list[UIElement] = Field(default_factory=list, description="检测到的 UI 元素列表")
+
+    class Config:
+        """Pydantic 模型配置。"""
+        arbitrary_types_allowed = True  # 允许 numpy 数组类型

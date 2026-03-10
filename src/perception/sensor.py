@@ -222,7 +222,7 @@ class MaaSensor:
         """使用 pywin32 进行窗口/桌面捕获（回退方案）。
 
         当指定窗口句柄时捕获窗口，否则捕获整个桌面。
-        窗口捕获使用 BitBlt 从桌面截取窗口区域。
+        窗口捕获使用 BitBlt 从桌面截取窗口区域，并考虑 DPI 缩放。
 
         Returns:
             Optional[np.ndarray]: RGB 格式的 numpy 数组。
@@ -232,6 +232,7 @@ class MaaSensor:
             import win32ui
             import win32con
             import win32api
+            import ctypes
 
             # 确定目标窗口
             hwnd = self._hwnd if self._hwnd != 0 else win32gui.GetDesktopWindow()
@@ -263,35 +264,72 @@ class MaaSensor:
                 win32gui.ReleaseDC(hwnd, hwnd_dc)
 
             else:
-                # 窗口捕获 - 从桌面截取窗口区域
-                # 获取窗口在屏幕上的位置
-                rect = win32gui.GetWindowRect(hwnd)
-                left, top, right, bottom = rect
-                width = right - left
-                height = bottom - top
+                # 窗口捕获 - 获取客户区尺寸（考虑 DPI 缩放）
+                # 方法 1: 使用 GetClientRect 获取客户区尺寸（已经是逻辑像素）
+                client_rect = win32gui.GetClientRect(hwnd)
+                client_width = client_rect[2] - client_rect[0]
+                client_height = client_rect[3] - client_rect[1]
+
+                # 方法 2: 获取窗口在屏幕上的位置（物理像素）
+                window_rect = win32gui.GetWindowRect(hwnd)
+                left = window_rect[0]
+                top = window_rect[1]
+
+                # 计算非客户区边框（窗口装饰）
+                window_width = window_rect[2] - window_rect[0]
+                window_height = window_rect[3] - window_rect[1]
 
                 # 检查窗口是否最小化
                 if win32gui.IsIconic(hwnd):
                     logger.warning(f"窗口 0x{hwnd:x} 已最小化，无法捕获")
                     return None
 
-                # 桌面 DC
+                # 获取窗口的 DPI 缩放因子
+                try:
+                    # Windows 10 1607+ 支持 GetDpiForWindow
+                    dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+                    scale_x = dpi / 96.0
+                    scale_y = dpi / 96.0
+                except Exception:
+                    # 回退到系统 DPI
+                    try:
+                        dpi_x = ctypes.c_uint()
+                        dpi_y = ctypes.c_uint()
+                        hwnd_monitor = ctypes.windll.user32.MonitorFromWindow(
+                            hwnd, ctypes.c_uint(2)  # MONITOR_DEFAULTTONEAREST
+                        )
+                        ctypes.windll.shcore.GetDpiForMonitor(
+                            hwnd_monitor, 0,  # MDT_EFFECTIVE_DPI
+                            ctypes.byref(dpi_x), ctypes.byref(dpi_y)
+                        )
+                        scale_x = dpi_x.value / 96.0
+                        scale_y = dpi_y.value / 96.0
+                    except Exception:
+                        scale_x = 1.0
+                        scale_y = 1.0
+
+                # 使用窗口位置从桌面截取（物理像素）
                 desktop_hwnd = win32gui.GetDesktopWindow()
                 desktop_dc = win32gui.GetWindowDC(desktop_hwnd)
                 mfc_dc = win32ui.CreateDCFromHandle(desktop_dc)
                 save_dc = mfc_dc.CreateCompatibleDC()
 
-                # 创建位图
                 bitmap = win32ui.CreateBitmap()
-                bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+                bitmap.CreateCompatibleBitmap(mfc_dc, window_width, window_height)
                 save_dc.SelectObject(bitmap)
 
-                # 从桌面截取窗口区域
-                save_dc.BitBlt((0, 0), (width, height), mfc_dc, (left, top), win32con.SRCCOPY)
+                # 从桌面截取窗口区域（物理像素坐标）
+                save_dc.BitBlt(
+                    (0, 0),
+                    (window_width, window_height),
+                    mfc_dc,
+                    (left, top),
+                    win32con.SRCCOPY
+                )
 
                 bmpstr = bitmap.GetBitmapBits(True)
                 img = np.frombuffer(bmpstr, dtype='uint8')
-                img = img.reshape((height, width, 4))
+                img = img.reshape((window_height, window_width, 4))
 
                 win32gui.DeleteObject(bitmap.GetHandle())
                 save_dc.DeleteDC()

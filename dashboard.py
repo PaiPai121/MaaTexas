@@ -20,9 +20,24 @@ import numpy as np
 import streamlit as st
 
 from src.perception import MaaSensor
-from src.perception.models import GameState
+from src.perception.models import GameState, PerceptionResult
 from src.planning.models import ActionCommand, ActionType, TaskPlan
 from src.utils.window import enumerate_windows, WindowInfo
+from src.perception.cv_pipeline import FastPerceptionPipeline
+
+
+# =============================================================================
+# Windows DPI 感知设置（防止截图坐标错位）
+# =============================================================================
+
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -97,24 +112,24 @@ st.markdown("""
 # =============================================================================
 
 @st.cache_resource
-def get_sensor(hwnd: int = 0) -> MaaSensor:
+def get_sensor(_hwnd: int = 0) -> MaaSensor:
     """获取或创建 MaaSensor 单例实例。
 
     使用 @st.cache_resource 确保传感器只被实例化和连接一次，
     防止页面每次刷新都断开重连。
 
     Args:
-        hwnd: 目标窗口句柄，0 表示捕获桌面。
+        _hwnd: 目标窗口句柄，0 表示捕获桌面。（使用 _ 前缀让 streamlit 忽略此参数用于缓存）
 
     Returns:
         MaaSensor: 已连接的传感器实例。
     """
     sensor = MaaSensor()
     # 根据句柄连接（0 表示桌面）
-    if hwnd != 0:
+    if _hwnd != 0:
         # 通过句柄查找窗口标题
         windows = enumerate_windows()
-        target = next((w for w in windows if w.hwnd == hwnd), None)
+        target = next((w for w in windows if w.hwnd == _hwnd), None)
         if target:
             sensor.connect(window_title=target.title)
         else:
@@ -122,6 +137,21 @@ def get_sensor(hwnd: int = 0) -> MaaSensor:
     else:
         sensor.connect()
     return sensor
+
+
+def get_sensor_for_hwnd(hwnd: int = 0) -> MaaSensor:
+    """获取指定窗口的传感器实例（不缓存，每次创建新的）。
+
+    Args:
+        hwnd: 目标窗口句柄，0 表示捕获桌面。
+
+    Returns:
+        MaaSensor: 已连接的传感器实例。
+    """
+    # 清除缓存
+    get_sensor.clear()
+    # 创建新实例
+    return get_sensor(hwnd)
 
 
 def capture_sensor_frame(sensor: MaaSensor) -> Optional[np.ndarray]:
@@ -134,6 +164,27 @@ def capture_sensor_frame(sensor: MaaSensor) -> Optional[np.ndarray]:
         Optional[np.ndarray]: RGB 格式的画面数组，失败返回 None。
     """
     return sensor.capture_frame()
+
+
+# =============================================================================
+# OpenCV 感知管线（使用 Streamlit 缓存机制）
+# =============================================================================
+
+@st.cache_resource
+def get_cv_pipeline() -> FastPerceptionPipeline:
+    """获取或创建 FastPerceptionPipeline 单例实例。
+
+    使用 @st.cache_resource 确保管线只被实例化一次。
+
+    Returns:
+        FastPerceptionPipeline: 感知管线实例。
+    """
+    return FastPerceptionPipeline(
+        min_contour_area=100.0,
+        max_contour_area_ratio=0.6,
+        canny_low=50,
+        canny_high=150
+    )
 
 
 # =============================================================================
@@ -350,19 +401,31 @@ with st.sidebar:
     ]
     window_values = [0] + [w.hwnd for w in available_windows]
 
-    # 窗口选择下拉框
+    # 窗口选择下拉框 - 使用 session_state 跟踪变化
+    if "selected_hwnd" not in st.session_state:
+        st.session_state.selected_hwnd = 0
+        st.session_state.last_sensor_hwnd = -1  # 用于检测变化
+
     selected_index = st.selectbox(
         "🎯 捕获目标",
         options=range(len(window_options)),
         format_func=lambda i: window_options[i],
         index=0,  # 默认选择桌面
-        help="选择要捕获的窗口或桌面"
+        help="选择要捕获的窗口或桌面",
+        key="window_selector"
     )
 
     # 获取选中的窗口句柄
     selected_hwnd = window_values[selected_index]
+    
+    # 检测窗口变化，如果变化则清除缓存
+    if selected_hwnd != st.session_state.last_sensor_hwnd:
+        get_sensor.clear()
+        st.session_state.last_sensor_hwnd = selected_hwnd
+    
+    st.session_state.selected_hwnd = selected_hwnd
 
-    # 根据选择获取传感器
+    # 根据选择获取传感器（窗口变化时会重新创建）
     sensor = get_sensor(selected_hwnd)
 
     # 传感器状态显示
@@ -414,16 +477,17 @@ with st.sidebar:
 
     # 信息面板
     st.info("""
-    **MaaTexas God's Eye**
+    **MaaTexas God's Eye** - 实时调试看板
 
-    实时调试看板，用于监控：
+    监控：
     - 📡 MaaFramework 传感器画面流
     - 🌍 世界模型状态
     - 🧠 LLM 推理日志
+    - 🎮 用户指令中心
     """)
 
-    # 关于
-    with st.expander("ℹ️ 关于"):
+    # 技术信息
+    with st.expander("ℹ️ 技术栈"):
         st.write("""
         - **框架**: MaaTexas
         - **UI**: Streamlit
@@ -444,8 +508,16 @@ st.divider()
 # 获取传感器实例
 sensor = get_sensor()
 
+# 获取 CV 管线实例
+pipeline = get_cv_pipeline()
+
 # 捕获真实画面
 real_frame = capture_sensor_frame(sensor)
+
+# 处理感知管线（如果有画面）
+perception_result: Optional[PerceptionResult] = None
+if real_frame is not None:
+    perception_result = pipeline.process(real_frame)
 
 # 生成 Mock 数据（用于世界模型和推理）
 game_state = generate_mock_game_state()
@@ -462,11 +534,11 @@ col1, col2 = st.columns([6, 4])
 with col1:
     st.subheader("📡 Sensor Feed")
 
-    if real_frame is not None:
-        # 显示真实画面（RGB 格式）
+    if perception_result is not None and real_frame is not None:
+        # 显示感知处理后的画面（带 SoM 标注）
         st.image(
-            real_frame,
-            caption=f"实时传感器画面 | 分辨率：{real_frame.shape[1]}x{real_frame.shape[0]}",
+            perception_result.annotated_image,
+            caption=f"实时传感器画面 (SoM 标注) | 分辨率：{real_frame.shape[1]}x{real_frame.shape[0]} | 检测到 {len(perception_result.ui_elements)} 个 UI 元素",
             use_container_width=True
         )
 
@@ -475,7 +547,15 @@ with col1:
         with col_img1:
             st.metric("图像尺寸", f"{real_frame.shape[1]}x{real_frame.shape[0]}")
         with col_img2:
-            st.metric("帧率", "实时")
+            st.metric("检测到 UI 元素", len(perception_result.ui_elements))
+    elif real_frame is not None:
+        # 感知处理失败但原始画面存在
+        st.image(
+            real_frame,
+            caption=f"实时传感器画面 | 分辨率：{real_frame.shape[1]}x{real_frame.shape[0]}",
+            use_container_width=True
+        )
+        st.warning("⚠️ 感知管线处理失败，显示原始画面")
     else:
         # 占位提示
         st.warning("⚠️ 等待传感器信号...")
@@ -497,8 +577,22 @@ with col1:
 # 右栏：World Model + LLM Reasoning + User Command Center
 # -----------------------------------------------------------------------------
 with col2:
-    # 上部：User Command Center（用户指令中心）
+    # 上部：User Command Center（用户指令中心）+ 指令输入
     st.subheader("🎮 User Command Center")
+
+    # 聊天输入框（放在顶部，更显眼）
+    user_input = st.chat_input(
+        "请输入您想让 MaaTexas 执行的游戏任务...",
+        key="command_input"
+    )
+
+    # 处理用户输入
+    if user_input:
+        process_user_command(user_input)
+        st.success(f"✅ 指令已接收：{user_input}")
+        st.info("🔄 正在规划任务...（TODO: 接入 LLM 规划器）")
+        if auto_refresh:
+            st.rerun()
 
     # 显示最新指令
     if st.session_state.latest_command:
@@ -513,7 +607,7 @@ with col2:
             </div>
         """, unsafe_allow_html=True)
     else:
-        st.info("💬 在下方输入框中输入指令，让 MaaTexas 执行游戏任务")
+        st.info("💬 在上方输入框中输入指令，让 MaaTexas 执行游戏任务")
 
     # 指令历史（最近 5 条）
     if st.session_state.command_history:
@@ -540,21 +634,51 @@ with col2:
     st.subheader("🌍 World Model")
 
     # 使用 Tabs 组织不同的模型视图
-    tab_state, tab_action, tab_plan = st.tabs(["GameState", "Action", "TaskPlan"])
+    tabs = ["GameState", "Action", "TaskPlan"]
+    if perception_result is not None:
+        tabs.append("Perception")
+    
+    tab_objects = st.tabs(tabs)
 
-    with tab_state:
+    with tab_objects[0]:
         st.markdown("**当前游戏状态** (Mock)")
         st.json(game_state.model_dump(mode="json", by_alias=True))
 
-    with tab_action:
+    with tab_objects[1]:
         st.markdown("**当前行为命令** (Mock)")
         st.json(action_command.model_dump(mode="json", by_alias=True))
 
-    with tab_plan:
+    with tab_objects[2]:
         st.markdown("**任务计划** (Mock)")
         st.json(task_plan.model_dump(mode="json", by_alias=True))
 
-    st.divider()
+    # Perception Tab（感知结果）
+    if perception_result is not None:
+        with tab_objects[3]:
+            st.markdown("**感知管线结果**")
+            
+            # 显示 UI 元素列表
+            if perception_result.ui_elements:
+                st.markdown(f"**检测到 {len(perception_result.ui_elements)} 个 UI 元素**")
+                
+                # 构建可序列化的数据结构
+                ui_data = []
+                for elem in perception_result.ui_elements:
+                    ui_data.append({
+                        "id": elem.element_id,
+                        "type": elem.element_type,
+                        "confidence": round(elem.confidence, 3),
+                        "bbox": {
+                            "x": elem.bbox[0],
+                            "y": elem.bbox[1],
+                            "width": elem.bbox[2],
+                            "height": elem.bbox[3]
+                        }
+                    })
+                
+                st.json({"ui_elements": ui_data, "count": len(ui_data)})
+            else:
+                st.info("未检测到 UI 元素")
 
     # 下部：LLM Reasoning（推理日志）
     st.subheader("🧠 LLM Reasoning")
@@ -578,33 +702,6 @@ with col2:
                 """,
                 unsafe_allow_html=True
             )
-
-
-# =============================================================================
-# 用户指令输入（聊天组件）
-# =============================================================================
-
-st.divider()
-st.subheader("💬 指令输入")
-
-# 聊天输入框
-user_input = st.chat_input(
-    placeholder="请输入您想让 MaaTexas 执行的游戏任务...",
-    key="command_input"
-)
-
-# 处理用户输入
-if user_input:
-    # 处理指令
-    process_user_command(user_input)
-
-    # 显示确认消息
-    st.success(f"✅ 指令已接收：{user_input}")
-    st.info("🔄 正在规划任务...（TODO: 接入 LLM 规划器）")
-
-    # 如果开启自动刷新，立即刷新显示新指令
-    if auto_refresh:
-        st.rerun()
 
 
 # =============================================================================
