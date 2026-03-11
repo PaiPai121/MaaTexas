@@ -16,12 +16,17 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
+import logging
 import numpy as np
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from src.perception import MaaSensor
 from src.perception.models import GameState, PerceptionResult
 from src.planning.models import ActionCommand, ActionType, TaskPlan
+from src.planning.vlm_client import VLMPlanner
+from src.planning.exceptions import PlanningError
 from src.utils.window import enumerate_windows, WindowInfo
 from src.perception.cv_pipeline import FastPerceptionPipeline
 
@@ -187,6 +192,18 @@ def get_cv_pipeline() -> FastPerceptionPipeline:
     )
 
 
+@st.cache_resource
+def get_planner() -> VLMPlanner:
+    """获取或创建 VLMPlanner 单例实例。
+
+    使用 @st.cache_resource 确保规划器只被实例化一次。
+
+    Returns:
+        VLMPlanner: VLM 规划器实例。
+    """
+    return VLMPlanner(model="glm-4v-flash")
+
+
 # =============================================================================
 # 用户指令管理（使用 Session State）
 # =============================================================================
@@ -199,22 +216,29 @@ if "command_history" not in st.session_state:
 if "latest_command" not in st.session_state:
     st.session_state.latest_command = None
 
+# 当前行为命令（由 VLM 生成）
+if "current_action" not in st.session_state:
+    st.session_state.current_action = None
 
-def process_user_command(command: str) -> None:
-    """处理用户指令。
+
+def process_user_command(
+    command: str,
+    perception: Optional[PerceptionResult],
+    game_state: GameState
+) -> None:
+    """处理用户指令，使用 VLM 进行智能决策。
 
     Args:
         command: 用户输入的自然语言指令。
-
-    TODO: 这里将调用 src.planning 模块，把用户指令和当前的 GameState
-          发送给 LLM/宏观规划器，生成 ActionCommand。
+        perception: 感知管线输出结果（包含标注图像和 UI 元素）。
+        game_state: 当前游戏状态。
 
     架构说明：
     1. 接收用户自然语言指令
-    2. 结合当前 GameState（感知层数据）
-    3. 调用 LLM 规划器进行意图理解和任务分解
-    4. 生成 TaskPlan 和 ActionCommand 序列
-    5. 下发至控制层执行
+    2. 检查感知数据有效性
+    3. 调用 VLM 规划器进行意图理解和任务分解
+    4. 生成 ActionCommand
+    5. 保存到 session_state 供控制层使用
     """
     # 将指令添加到历史
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -230,27 +254,48 @@ def process_user_command(command: str) -> None:
         "timestamp": timestamp
     }
 
-    # TODO: 这里将调用 src.planning 模块，把用户指令和当前的 GameState
-    # 发送给 LLM/宏观规划器，生成 ActionCommand。
-    #
-    # 示例代码架构（待实现）：
-    # ```python
-    # from src.planning import TaskPlanner, LLMPlanner
-    #
-    # planner = LLMPlanner()
-    # task_plan = planner.plan_from_command(
-    #     command=command,
-    #     game_state=game_state
-    # )
-    #
-    # # 生成 ActionCommand 序列
-    # action_commands = task_plan.to_action_commands()
-    #
-    # # 下发至控制层
-    # from src.control import Controller
-    # controller = Controller()
-    # controller.execute_sequence(action_commands)
-    # ```
+    # 检查感知数据有效性
+    if perception is None or not perception.ui_elements:
+        st.error("⚠️ 当前没有有效的视觉感知数据，无法规划")
+        # 更新状态为 failed
+        if st.session_state.command_history:
+            st.session_state.command_history[-1]["status"] = "failed"
+        return
+
+    # 显示等待提示
+    st.toast("🤖 正在呼叫 VLM 大脑推理中...", icon="🧠")
+
+    # 使用 spinner 显示加载状态
+    with st.spinner("🔮 VLM 正在分析画面并生成决策..."):
+        try:
+            # 获取 VLM 规划器
+            planner = get_planner()
+
+            # 调用 VLM 生成行为命令
+            action = planner.generate_action(perception, game_state, command)
+
+            # 保存到 session_state
+            st.session_state.current_action = action
+
+            # 更新状态为 completed
+            if st.session_state.command_history:
+                st.session_state.command_history[-1]["status"] = "completed"
+
+            # 显示成功提示
+            st.success(f"✅ 决策完成：点击坐标 ({action.target_coords[0]}, {action.target_coords[1]})")
+            if action.params.get("thought"):
+                st.info(f"💭 VLM 思考：{action.params['thought'][:200]}...")
+
+        except PlanningError as e:
+            logger.error(f"VLM 规划失败：{e.code} - {e.message}")
+            st.error(f"❌ 规划失败：{e.message}")
+            if st.session_state.command_history:
+                st.session_state.command_history[-1]["status"] = "failed"
+        except Exception as e:
+            logger.error(f"VLM 调用异常：{type(e).__name__}: {e}")
+            st.error(f"❌ 调用失败：{type(e).__name__}: {e}")
+            if st.session_state.command_history:
+                st.session_state.command_history[-1]["status"] = "failed"
 
 
 # =============================================================================
@@ -524,7 +569,8 @@ if real_frame is not None:
 
 # 生成 Mock 数据（用于世界模型和推理）
 game_state = generate_mock_game_state()
-action_command = generate_mock_action_command()
+# 优先使用 VLM 生成的行为命令，如果没有则使用 Mock
+action_command = st.session_state.get("current_action") or generate_mock_action_command()
 task_plan = generate_mock_task_plan()
 llm_logs = generate_llm_reasoning_log(game_state)
 
@@ -591,11 +637,15 @@ with col2:
 
     # 处理用户输入
     if user_input:
-        process_user_command(user_input)
-        st.success(f"✅ 指令已接收：{user_input}")
-        st.info("🔄 正在规划任务...（TODO: 接入 LLM 规划器）")
-        if auto_refresh:
-            st.rerun()
+        # 检查是否有有效的感知数据
+        if perception_result is None or not perception_result.ui_elements:
+            st.error("⚠️ 当前没有有效的视觉感知数据，请先捕获画面")
+        else:
+            # 调用 VLM 规划器（在 process_user_command 内部处理）
+            process_user_command(user_input, perception_result, game_state)
+            # 注意：process_user_command 内部已经显示了成功/失败提示
+            if auto_refresh:
+                st.rerun()
 
     # 显示最新指令
     if st.session_state.latest_command:
