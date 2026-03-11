@@ -201,7 +201,7 @@ def get_planner() -> VLMPlanner:
     Returns:
         VLMPlanner: VLM 规划器实例。
     """
-    return VLMPlanner(model="glm-4v-flash")
+    return VLMPlanner(model="glm-4v-flash")  # 使用视觉多模态模型
 
 
 # =============================================================================

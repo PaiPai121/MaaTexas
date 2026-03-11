@@ -48,7 +48,8 @@ class VLMPlanner:
         """初始化 VLM 规划器。
 
         Args:
-            model: 使用的模型名称，默认为 glm-4v-flash。
+            model: 使用的模型名称，默认为 glm-4v-flash（视觉多模态模型）。
+                   其他可选值：glm-4-flash（文本）。
 
         Raises:
             PlanningError: 当 API 密钥未配置时抛出。
@@ -70,7 +71,7 @@ class VLMPlanner:
             base_url="https://open.bigmodel.cn/api/paas/v4/"
         )
 
-        logger.info(f"VLMPlanner 已初始化，模型：{model}")
+        logger.info(f"VLMPlanner 已初始化，模型：{model}（视觉多模态）")
 
     def _image_to_base64(self, image: np.ndarray) -> str:
         """将图像转换为 base64 字符串。
@@ -213,33 +214,32 @@ class VLMPlanner:
         simplified_ui = self._simplify_ui_elements(perception.ui_elements)
 
         # 2. 组装 System Prompt
-        system_prompt = """你是一个二游自动化 Agent 的决策大脑。
+        system_prompt = """你是一个二游自动化 Agent 的决策大脑（视觉多模态）。
 你的任务是根据当前游戏画面和用户需求，选择最合适的 UI 元素进行交互。
 
 **输出格式要求：**
 直接返回 JSON，不要任何其他文字：
-{"thought": "你的思考过程", "target_id": "选中的元素 ID"}
+{{"thought": "你的思考过程", "target_id": "选中的元素 ID"}}
 
-**可用 UI 元素列表：**
-{ui_list}
+**注意：**
+- 画面中已经用红色框和编号标注了检测到的 UI 元素
+- 请根据画面内容和用户指令，选择最合适的元素 ID
+- 如果画面中没有合适的元素，target_id 设为 null"""
 
-如果画面中没有合适的元素，target_id 设为 null。"""
-
-        # 3. 组装 User Message
+        # 3. 将图像转换为 base64
         base64_image = self._image_to_base64(perception.annotated_image)
 
-        user_message = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}"
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": f"""当前游戏状态：
+        # 4. 组装 User Message（包含图像）
+        user_message_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_image}"
+                }
+            },
+            {
+                "type": "text",
+                "text": f"""当前游戏状态：
 - 场景：{game_state.current_scene}
 - 生命值：{game_state.hp_percent:.1f}%
 - 理智值：{game_state.sanity_percent:.1f}%
@@ -248,17 +248,17 @@ class VLMPlanner:
 
 用户指令：{user_command}
 
-可选 UI 元素（共{len(simplified_ui)}个）：
+检测到的 UI 元素（共{len(simplified_ui)}个）：
 {json.dumps(simplified_ui, ensure_ascii=False, indent=2)}
 
 请分析画面并选择要交互的元素 ID。"""
-                }
-            ]
-        }
+            }
+        ]
 
-        # 4. 发起请求
+        # 5. 发起请求
         try:
             logger.info(f"调用 VLM ({self.model}) 进行决策...")
+            logger.info(f"图像尺寸：{perception.annotated_image.shape}")
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -266,29 +266,54 @@ class VLMPlanner:
                     {"role": "system", "content": system_prompt.format(
                         ui_list=json.dumps(simplified_ui, ensure_ascii=False)
                     )},
-                    user_message
+                    {"role": "user", "content": user_message_content}
                 ],
                 temperature=0.1,  # 低温度确保输出稳定
-                max_tokens=500
+                max_tokens=500,
+                timeout=60  # 视觉模型可能需要更长时间
             )
 
-            # 智谱 API 响应格式：response.choices[0].message.content
-            # 但也可能是 response.data.choices[0].message.content
-            logger.debug(f"响应类型：{type(response)}")
-            logger.debug(f"响应结构：{dir(response)}")
+            # 智谱 API 响应格式可能不同，使用安全方式访问
+            response_text = None
             
-            # 尝试多种响应格式
+            # 尝试使用 Pydantic 模型方式访问
             try:
-                response_text = response.choices[0].message.content
-            except (KeyError, AttributeError) as e:
-                logger.warning(f"标准格式解析失败：{e}，尝试备用格式...")
-                # 智谱可能使用不同的响应结构
-                if hasattr(response, 'data'):
+                # OpenAI SDK v1.x 使用 Pydantic 模型
+                if hasattr(response, 'choices') and response.choices:
+                    # 检查 choices 是列表还是字典
+                    if isinstance(response.choices, list):
+                        choice = response.choices[0]
+                    elif isinstance(response.choices, dict):
+                        # 智谱可能返回字典格式
+                        choice = list(response.choices.values())[0] if response.choices else None
+                    else:
+                        choice = response.choices
+                    
+                    if choice and hasattr(choice, 'message'):
+                        msg = choice.message
+                        if hasattr(msg, 'content'):
+                            content = msg.content
+                            # content 可能是字符串，直接返回
+                            response_text = content if content else None
+            except Exception as e:
+                logger.warning(f"Pydantic 格式解析失败：{e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+            
+            # 如果失败，尝试其他方式
+            if not response_text:
+                if isinstance(response, dict):
+                    # 字典格式
+                    choices = response.get('choices', [])
+                    if choices:
+                        response_text = choices[0].get('message', {}).get('content', '')
+                    else:
+                        response_text = response.get('result', '')
+                elif hasattr(response, 'data'):
                     response_text = response.data.choices[0].message.content
                 elif hasattr(response, 'result'):
                     response_text = response.result
                 else:
-                    # 如果响应本身就是字符串
                     response_text = str(response)
 
             logger.info(f"原始响应：{response_text[:300] if response_text else 'None'}...")
@@ -304,6 +329,8 @@ class VLMPlanner:
             if isinstance(e, PlanningError):
                 raise
             logger.error(f"API 调用异常：{type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"堆栈跟踪：{traceback.format_exc()}")
             raise PlanningError(
                 code="PLANNING_VLM_004",
                 message="VLM API 调用失败",
@@ -311,7 +338,9 @@ class VLMPlanner:
             )
 
         # 5. 解析响应并映射坐标
+        logger.info(f"开始解析响应...")
         parsed = self._parse_llm_response(response_text)
+        logger.info(f"解析结果：{parsed}")
 
         # 提取思考过程（用于日志）
         thought = parsed.get("thought", "无思考过程")
