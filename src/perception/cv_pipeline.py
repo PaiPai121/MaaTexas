@@ -229,11 +229,23 @@ class FastPerceptionPipeline:
                 thickness
             )
 
+            # 边界检查：防止标号飞出屏幕顶部
+            # 计算背景矩形的 Y 坐标
+            bg_y1 = y - text_h - baseline - 5
+            bg_y2 = y
+            text_y = y - baseline - 2
+
+            # 如果背景顶部超出屏幕，则将文字画在矩形框下方
+            if bg_y1 < 0:
+                bg_y1 = y + h
+                bg_y2 = y + h + text_h + baseline + 5
+                text_y = y + h + text_h + 2
+
             # 绘制背景矩形
             cv2.rectangle(
                 image,
-                (x, y - text_h - baseline - 5),
-                (x + text_w, y),
+                (x, bg_y1),
+                (x + text_w, bg_y2),
                 (255, 0, 0),  # 红色背景
                 -1  # 填充
             )
@@ -242,7 +254,7 @@ class FastPerceptionPipeline:
             cv2.putText(
                 image,
                 label,
-                (x, y - baseline - 2),
+                (x, text_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale,
                 (255, 255, 255),  # 白色文字

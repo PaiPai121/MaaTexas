@@ -190,6 +190,7 @@ class MaaSensor:
         """捕获一帧画面（RGB 格式）。
 
         同步方法，优先使用 MaaFramework，失败时回退到 pywin32。
+        使用 loop.run_until_complete() 避免 asyncio.run() 在高频调用下的内存泄漏风险。
 
         Returns:
             Optional[np.ndarray]: RGB 格式的 numpy 数组。
@@ -212,7 +213,22 @@ class MaaSensor:
 
         # 否则尝试使用 MaaFramework
         try:
-            return asyncio.run(self._capture_frame_async())
+            # 使用 loop.run_until_complete() 避免 asyncio.run() 的内存泄漏风险
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                # 如果当前已经有运行的 loop（在 Streamlit 中较少见），直接回退
+                logger.warning("检测到运行中的 event loop，使用回退方案")
+                return self._capture_fallback()
+            except RuntimeError:
+                # 没有运行的 loop，创建一个新的
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(self._capture_frame_async())
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
         except Exception as e:
             logger.error(f"MaaFramework 截图失败，切换到回退模式：{e}")
             self.use_fallback = True
@@ -222,7 +238,7 @@ class MaaSensor:
         """使用 pywin32 进行窗口/桌面捕获（回退方案）。
 
         当指定窗口句柄时捕获窗口，否则捕获整个桌面。
-        窗口捕获使用 BitBlt 从桌面截取窗口区域，并考虑 DPI 缩放。
+        桌面捕获使用 BitBlt，窗口捕获使用 PrintWindow API 以支持后台遮挡截图。
 
         Returns:
             Optional[np.ndarray]: RGB 格式的 numpy 数组。
@@ -264,18 +280,9 @@ class MaaSensor:
                 win32gui.ReleaseDC(hwnd, hwnd_dc)
 
             else:
-                # 窗口捕获 - 获取客户区尺寸（考虑 DPI 缩放）
-                # 方法 1: 使用 GetClientRect 获取客户区尺寸（已经是逻辑像素）
-                client_rect = win32gui.GetClientRect(hwnd)
-                client_width = client_rect[2] - client_rect[0]
-                client_height = client_rect[3] - client_rect[1]
-
-                # 方法 2: 获取窗口在屏幕上的位置（物理像素）
+                # 窗口捕获 - 使用 PrintWindow API 支持后台遮挡截图
+                # 获取窗口在屏幕上的位置（物理像素）
                 window_rect = win32gui.GetWindowRect(hwnd)
-                left = window_rect[0]
-                top = window_rect[1]
-
-                # 计算非客户区边框（窗口装饰）
                 window_width = window_rect[2] - window_rect[0]
                 window_height = window_rect[3] - window_rect[1]
 
@@ -284,57 +291,68 @@ class MaaSensor:
                     logger.warning(f"窗口 0x{hwnd:x} 已最小化，无法捕获")
                     return None
 
-                # 获取窗口的 DPI 缩放因子
-                try:
-                    # Windows 10 1607+ 支持 GetDpiForWindow
-                    dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
-                    scale_x = dpi / 96.0
-                    scale_y = dpi / 96.0
-                except Exception:
-                    # 回退到系统 DPI
-                    try:
-                        dpi_x = ctypes.c_uint()
-                        dpi_y = ctypes.c_uint()
-                        hwnd_monitor = ctypes.windll.user32.MonitorFromWindow(
-                            hwnd, ctypes.c_uint(2)  # MONITOR_DEFAULTTONEAREST
-                        )
-                        ctypes.windll.shcore.GetDpiForMonitor(
-                            hwnd_monitor, 0,  # MDT_EFFECTIVE_DPI
-                            ctypes.byref(dpi_x), ctypes.byref(dpi_y)
-                        )
-                        scale_x = dpi_x.value / 96.0
-                        scale_y = dpi_y.value / 96.0
-                    except Exception:
-                        scale_x = 1.0
-                        scale_y = 1.0
+                logger.info(f"窗口捕获：0x{hwnd:x}, 尺寸={window_width}x{window_height}")
 
-                # 使用窗口位置从桌面截取（物理像素）
-                desktop_hwnd = win32gui.GetDesktopWindow()
-                desktop_dc = win32gui.GetWindowDC(desktop_hwnd)
-                mfc_dc = win32ui.CreateDCFromHandle(desktop_dc)
+                # 获取窗口的 DC
+                hwnd_dc = win32gui.GetWindowDC(hwnd)
+                mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
                 save_dc = mfc_dc.CreateCompatibleDC()
 
+                # 创建位图
                 bitmap = win32ui.CreateBitmap()
                 bitmap.CreateCompatibleBitmap(mfc_dc, window_width, window_height)
                 save_dc.SelectObject(bitmap)
 
-                # 从桌面截取窗口区域（物理像素坐标）
-                save_dc.BitBlt(
-                    (0, 0),
-                    (window_width, window_height),
-                    mfc_dc,
-                    (left, top),
-                    win32con.SRCCOPY
-                )
+                # 使用 PrintWindow API 进行后台截图
+                # PW_RENDERFULLCONTENT = 2 (Windows 8.1+ 支持硬件加速窗口后台截图)
+                result = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)
 
-                bmpstr = bitmap.GetBitmapBits(True)
-                img = np.frombuffer(bmpstr, dtype='uint8')
-                img = img.reshape((window_height, window_width, 4))
+                logger.info(f"PrintWindow 返回：{result}")
 
+                if result == 1:
+                    # PrintWindow 成功，获取位图数据
+                    bmpstr = bitmap.GetBitmapBits(True)
+                    img = np.frombuffer(bmpstr, dtype='uint8')
+                    img = img.reshape((window_height, window_width, 4))
+                    logger.info(f"PrintWindow 成功：图像均值={img.mean():.1f}")
+                else:
+                    # PrintWindow 失败，回退到桌面 BitBlt（但会被遮挡）
+                    logger.warning(f"PrintWindow 失败 (0x{hwnd:x})，回退到桌面截取")
+                    
+                    # 从桌面截取窗口区域（物理像素坐标）
+                    desktop_hwnd = win32gui.GetDesktopWindow()
+                    desktop_dc = win32gui.GetWindowDC(desktop_hwnd)
+                    mfc_dc = win32ui.CreateDCFromHandle(desktop_dc)
+                    save_dc = mfc_dc.CreateCompatibleDC()
+                    
+                    bitmap2 = win32ui.CreateBitmap()
+                    bitmap2.CreateCompatibleBitmap(mfc_dc, window_width, window_height)
+                    save_dc.SelectObject(bitmap2)
+                    
+                    left = window_rect[0]
+                    top = window_rect[1]
+                    save_dc.BitBlt(
+                        (0, 0),
+                        (window_width, window_height),
+                        mfc_dc,
+                        (left, top),
+                        win32con.SRCCOPY
+                    )
+                    
+                    bmpstr = bitmap2.GetBitmapBits(True)
+                    img = np.frombuffer(bmpstr, dtype='uint8')
+                    img = img.reshape((window_height, window_width, 4))
+                    
+                    win32gui.DeleteObject(bitmap2.GetHandle())
+                    save_dc.DeleteDC()
+                    mfc_dc.DeleteDC()
+                    win32gui.ReleaseDC(desktop_hwnd, desktop_dc)
+
+                # 清理 PrintWindow 资源
                 win32gui.DeleteObject(bitmap.GetHandle())
                 save_dc.DeleteDC()
                 mfc_dc.DeleteDC()
-                win32gui.ReleaseDC(desktop_hwnd, desktop_dc)
+                win32gui.ReleaseDC(hwnd, hwnd_dc)
 
             # 转换为 RGB（去掉 alpha 通道）
             img_rgb = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2RGB)

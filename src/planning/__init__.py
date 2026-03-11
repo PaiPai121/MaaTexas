@@ -17,6 +17,7 @@ from src.planning.exceptions import (
     InvalidActionError,
     DependencyError,
 )
+from src.planning.vlm_client import VLMPlanner
 
 __all__ = [
     # Models
@@ -30,4 +31,6 @@ __all__ = [
     "TaskExecutionError",
     "InvalidActionError",
     "DependencyError",
+    # VLM
+    "VLMPlanner",
 ]

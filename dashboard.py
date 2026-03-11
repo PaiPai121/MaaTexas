@@ -505,8 +505,11 @@ st.markdown('<p class="main-header">👁️ MaaTexas God\'s Eye</p>', unsafe_all
 st.markdown('<p class="sub-header">实时调试与监控看板 | Real-time Debug Dashboard</p>', unsafe_allow_html=True)
 st.divider()
 
-# 获取传感器实例
-sensor = get_sensor()
+# 从 session_state 获取当前选择的窗口句柄
+current_hwnd = st.session_state.get("selected_hwnd", 0)
+
+# 获取传感器实例（使用当前选择的窗口句柄）
+sensor = get_sensor(current_hwnd)
 
 # 获取 CV 管线实例
 pipeline = get_cv_pipeline()
