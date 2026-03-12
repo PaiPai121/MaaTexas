@@ -7,14 +7,13 @@ MaaTexas God's Eye - 可视化 Debug 看板。
 
 传感器数据流：
 - 使用 src.perception.MaaSensor 接入真实的 MaaFramework 画面采集
-- 世界模型和推理日志暂时使用 Mock 数据（待后续接入 OCR）
-- 用户指令通过聊天输入组件接收，未来将接入 LLM 规划器
+- 感知管线使用 OpenCV 进行 UI 元素检测（SoM 标注）
+- 用户指令通过聊天输入组件接收，由 VLM 规划器生成决策
 """
 
-import random
 import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import logging
 import numpy as np
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from src.perception import MaaSensor
 from src.perception.models import GameState, PerceptionResult
-from src.planning.models import ActionCommand, ActionType, TaskPlan
+from src.planning.models import ActionCommand, ActionType
 from src.planning.vlm_client import VLMPlanner
 from src.planning.exceptions import PlanningError
 from src.utils.window import enumerate_windows, WindowInfo
@@ -265,6 +264,9 @@ def process_user_command(
     # 显示等待提示
     st.toast("🤖 正在呼叫 VLM 大脑推理中...", icon="🧠")
 
+    # 清空上一次的推理状态
+    st.session_state.current_action = None
+
     # 使用 spinner 显示加载状态
     with st.spinner("🔮 VLM 正在分析画面并生成决策..."):
         try:
@@ -296,127 +298,6 @@ def process_user_command(
             st.error(f"❌ 调用失败：{type(e).__name__}: {e}")
             if st.session_state.command_history:
                 st.session_state.command_history[-1]["status"] = "failed"
-
-
-# =============================================================================
-# Mock 数据生成器（用于世界模型和推理日志）
-# =============================================================================
-
-def generate_mock_game_state() -> GameState:
-    """生成模拟的游戏状态数据。
-
-    Returns:
-        GameState: 模拟的游戏状态实例。
-    """
-    scenes = ["main_menu", "battle", "recruit", "base", "shop"]
-    return GameState(
-        current_scene=random.choice(scenes),
-        hp_percent=random.uniform(20.0, 100.0),
-        sanity_percent=random.uniform(10.0, 100.0),
-        current_level=f"{random.randint(1, 7)}-{random.randint(1, 8)}",
-        is_battling=random.choice([True, False]),
-        last_update=datetime.now()
-    )
-
-
-def generate_mock_action_command() -> ActionCommand:
-    """生成模拟的行为命令数据。
-
-    Returns:
-        ActionCommand: 模拟的行为命令实例。
-    """
-    action_types = [ActionType.CLICK, ActionType.SWIPE, ActionType.WAIT, ActionType.NAVIGATE]
-    return ActionCommand(
-        action_type=random.choice(action_types),
-        target_coords=(random.randint(100, 800), random.randint(100, 600)) if random.random() > 0.3 else None,
-        duration_ms=random.randint(0, 2000),
-        params={"source": "mock_generator"},
-        priority=random.randint(0, 10),
-        timeout_seconds=random.uniform(5.0, 30.0)
-    )
-
-
-def generate_mock_task_plan() -> TaskPlan:
-    """生成模拟的任务计划数据。
-
-    Returns:
-        TaskPlan: 模拟的任务计划实例。
-    """
-    commands = [generate_mock_action_command() for _ in range(random.randint(1, 5))]
-    return TaskPlan(
-        task_id=f"TASK_{random.randint(1000, 9999)}",
-        task_name=random.choice(["自动战斗", "资源收集", "日常任务", "关卡推进"]),
-        commands=commands,
-        preconditions=["场景已加载", "网络已连接"],
-        expected_result="任务成功完成",
-        created_at=datetime.now()
-    )
-
-
-def generate_llm_reasoning_log(game_state: GameState) -> list[dict[str, Any]]:
-    """生成模拟的 LLM 推理过程日志。
-
-    Args:
-        game_state: 当前游戏状态，用于生成上下文相关的推理日志。
-
-    Returns:
-        list[dict[str, Any]]: 推理日志条目列表。
-    """
-    logs = [
-        {
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "INFO",
-            "message": "=== 开始新一轮决策循环 ==="
-        },
-        {
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "DEBUG",
-            "message": f"感知输入：scene={game_state.current_scene}, hp={game_state.hp_percent:.1f}%"
-        },
-    ]
-
-    # 根据游戏状态生成条件性推理
-    if game_state.hp_percent < 30.0:
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "WARNING",
-            "message": f"⚠️ 检测到 hp_percent ({game_state.hp_percent:.1f}%) < 0.3，准备触发治疗动作..."
-        })
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "INFO",
-            "message": "规划策略：优先执行 [撤退] -> [使用治疗道具]"
-        })
-    elif game_state.is_battling:
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "INFO",
-            "message": "当前处于战斗状态，继续执行战斗策略..."
-        })
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "DEBUG",
-            "message": "检测到敌方单位，计算最优攻击目标..."
-        })
-    else:
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "INFO",
-            "message": "非战斗状态，检查日常任务队列..."
-        })
-        logs.append({
-            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "level": "DEBUG",
-            "message": f"理智值剩余 {game_state.sanity_percent:.1f}%，评估是否继续作战"
-        })
-
-    logs.append({
-        "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-        "level": "INFO",
-        "message": "决策完成，下发行动指令至控制层"
-    })
-
-    return logs
 
 
 # =============================================================================
@@ -559,20 +440,28 @@ sensor = get_sensor(current_hwnd)
 # 获取 CV 管线实例
 pipeline = get_cv_pipeline()
 
-# 捕获真实画面
+# 捕获真实画面（带帧缓存机制，避免黑框闪烁）
 real_frame = capture_sensor_frame(sensor)
+
+# 帧缓存：如果获取失败，使用上一帧
+if real_frame is not None:
+    st.session_state.last_valid_frame = real_frame
+else:
+    real_frame = st.session_state.get("last_valid_frame")
 
 # 处理感知管线（如果有画面）
 perception_result: Optional[PerceptionResult] = None
 if real_frame is not None:
     perception_result = pipeline.process(real_frame)
 
-# 生成 Mock 数据（用于世界模型和推理）
-game_state = generate_mock_game_state()
-# 优先使用 VLM 生成的行为命令，如果没有则使用 Mock
-action_command = st.session_state.get("current_action") or generate_mock_action_command()
-task_plan = generate_mock_task_plan()
-llm_logs = generate_llm_reasoning_log(game_state)
+# 获取真实数据（从 session_state 或感知结果）
+game_state = GameState(
+    current_scene="unknown",
+    hp_percent=100.0,
+    sanity_percent=100.0
+)
+# 优先使用 VLM 生成的行为命令
+action_command = st.session_state.get("current_action")
 
 # 创建左右两栏布局 (6:4 比例)
 col1, col2 = st.columns([6, 4])
@@ -604,9 +493,8 @@ with col1:
             caption=f"实时传感器画面 | 分辨率：{real_frame.shape[1]}x{real_frame.shape[0]}",
             use_container_width=True
         )
-        st.warning("⚠️ 感知管线处理失败，显示原始画面")
     else:
-        # 占位提示
+        # 占位提示（黑色背景）
         st.warning("⚠️ 等待传感器信号...")
         st.info("""
         **可能原因：**
@@ -687,33 +575,32 @@ with col2:
     st.subheader("🌍 World Model")
 
     # 使用 Tabs 组织不同的模型视图
-    tabs = ["GameState", "Action", "TaskPlan"]
+    tabs = ["GameState", "Action"]
     if perception_result is not None:
         tabs.append("Perception")
-    
+
     tab_objects = st.tabs(tabs)
 
     with tab_objects[0]:
-        st.markdown("**当前游戏状态** (Mock)")
+        st.markdown("**当前游戏状态**")
         st.json(game_state.model_dump(mode="json", by_alias=True))
 
     with tab_objects[1]:
-        st.markdown("**当前行为命令** (Mock)")
-        st.json(action_command.model_dump(mode="json", by_alias=True))
-
-    with tab_objects[2]:
-        st.markdown("**任务计划** (Mock)")
-        st.json(task_plan.model_dump(mode="json", by_alias=True))
+        st.markdown("**当前行为命令**")
+        if action_command is not None:
+            st.json(action_command.model_dump(mode="json", by_alias=True))
+        else:
+            st.info("暂无行为命令，等待用户指令...")
 
     # Perception Tab（感知结果）
     if perception_result is not None:
-        with tab_objects[3]:
+        with tab_objects[2]:
             st.markdown("**感知管线结果**")
-            
+
             # 显示 UI 元素列表
             if perception_result.ui_elements:
                 st.markdown(f"**检测到 {len(perception_result.ui_elements)} 个 UI 元素**")
-                
+
                 # 构建可序列化的数据结构
                 ui_data = []
                 for elem in perception_result.ui_elements:
@@ -728,7 +615,7 @@ with col2:
                             "height": elem.bbox[3]
                         }
                     })
-                
+
                 st.json({"ui_elements": ui_data, "count": len(ui_data)})
             else:
                 st.info("未检测到 UI 元素")
@@ -737,24 +624,35 @@ with col2:
     st.subheader("🧠 LLM Reasoning")
 
     with st.expander("📜 查看推理过程日志", expanded=True):
-        for log_entry in llm_logs:
-            # 根据日志级别设置颜色
-            level_colors = {
-                "INFO": "🔵",
-                "DEBUG": "🟢",
-                "WARNING": "🟡",
-                "ERROR": "🔴"
-            }
-            icon = level_colors.get(log_entry["level"], "⚪")
+        # 检查是否有真实的 VLM 推理结果
+        if action_command is not None and "thought" in action_command.params:
+            # 展示真实的 VLM 推理日志
+            real_thought = action_command.params["thought"]
+            target_id = action_command.params.get("target_id", "未知")
 
+            # VLM 推理日志
             st.markdown(
                 f"""
                 <div class="log-entry">
-                    <code>{icon} [{log_entry["timestamp"]}] {log_entry["level"]}: {log_entry["message"]}</code>
+                    <code>🧠 [VLM 推理] {real_thought}</code>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+
+            # 系统执行日志
+            coords_str = f"{action_command.target_coords[0]}, {action_command.target_coords[1]}" if action_command.target_coords else "N/A"
+            st.markdown(
+                f"""
+                <div class="log-entry">
+                    <code>🎯 [系统执行] 决定点击 UI 元素 [{target_id}] -> 坐标 ({coords_str})</code>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            # 无推理任务时的提示
+            st.info("💤 暂无推理任务，等待用户下达指令...")
 
 
 # =============================================================================
