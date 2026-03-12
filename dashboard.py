@@ -28,6 +28,7 @@ from src.planning.vlm_client import VLMPlanner
 from src.planning.exceptions import PlanningError
 from src.utils.window import enumerate_windows, WindowInfo
 from src.perception.cv_pipeline import FastPerceptionPipeline
+from src.control.executor import ActionExecutor
 
 
 # =============================================================================
@@ -653,6 +654,17 @@ with col2:
                 """,
                 unsafe_allow_html=True
             )
+
+            # 执行按钮
+            st.divider()
+            if st.button("🕹️ 执行此动作 (Execute)", type="primary", use_container_width=True):
+                with st.spinner("正在向目标窗口发送后台点击指令..."):
+                    executor = ActionExecutor(hwnd=current_hwnd)
+                    success = executor.execute(action_command)
+                    if success:
+                        st.success("✅ 后台动作下发成功！(如果游戏内无反应，可能是游戏引擎屏蔽了虚拟输入)")
+                    else:
+                        st.error("❌ 动作执行失败，请检查控制台日志。")
         else:
             # 无推理任务时的提示
             st.info("💤 暂无推理任务，等待用户下达指令...")

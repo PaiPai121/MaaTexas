@@ -16,6 +16,7 @@ from src.control.exceptions import (
     DeviceNotFoundError,
     CoordinateInvalidError,
 )
+from src.control.executor import ActionExecutor
 
 __all__ = [
     # Models
@@ -28,4 +29,6 @@ __all__ = [
     "InputExecutionError",
     "DeviceNotFoundError",
     "CoordinateInvalidError",
+    # Executor
+    "ActionExecutor",
 ]
