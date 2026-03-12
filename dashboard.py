@@ -239,6 +239,9 @@ def process_user_command(
     4. 生成 ActionCommand
     5. 保存到 session_state 供控制层使用
     """
+    # 清空上一次的推理状态
+    st.session_state.current_action = None
+
     # 将指令添加到历史
     timestamp = datetime.now().strftime("%H:%M:%S")
     st.session_state.command_history.append({
