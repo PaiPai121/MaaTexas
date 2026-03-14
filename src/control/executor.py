@@ -144,6 +144,17 @@ class ActionExecutor:
             if not win32gui.IsWindowVisible(self.hwnd):
                 logger.warning(f"窗口 0x{self.hwnd:x} 不可见")
 
+            # 防御性激活：发送虚拟的 WM_ACTIVATE 消息
+            # 这不会让窗口跳到前台，只是告诉窗口"你被点击激活了"
+            # 某些游戏/应用需要这个信号才能响应后续的鼠标消息
+            win32api.SendMessage(
+                self.hwnd,
+                win32con.WM_ACTIVATE,
+                win32con.WA_CLICKACTIVE,
+                0  # lParam=0 表示最小化状态，不会激活到前台
+            )
+            logger.debug("已发送 WM_ACTIVATE (WA_CLICKACTIVE)")
+
             # 将相对坐标打包为 lParam 格式 (低 16 位=X, 高 16 位=Y)
             lparam = win32api.MAKELONG(x, y)
             logger.info(f"[后台模式] 窗口 0x{self.hwnd:x} 坐标 ({x}, {y}) -> lParam={lparam}")

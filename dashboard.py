@@ -347,7 +347,13 @@ with st.sidebar:
 
     # 获取选中的窗口句柄
     selected_hwnd = window_values[selected_index]
-    
+
+    # 后台点击提示
+    if selected_hwnd == 0:
+        st.caption("⚠️ 桌面模式无法使用后台点击，请选择具体窗口")
+    else:
+        st.caption("✅ 窗口模式支持后台无感点击")
+
     # 检测窗口变化，如果变化则清除缓存
     if selected_hwnd != st.session_state.last_sensor_hwnd:
         get_sensor.clear()
