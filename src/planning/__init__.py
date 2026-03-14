@@ -18,6 +18,7 @@ from src.planning.exceptions import (
     DependencyError,
 )
 from src.planning.vlm_client import VLMPlanner
+from src.planning.orchestrator import TaskOrchestrator, OrchestratorStatus, StepResult, TaskResult
 
 __all__ = [
     # Models
@@ -33,4 +34,9 @@ __all__ = [
     "DependencyError",
     # VLM
     "VLMPlanner",
+    # Orchestrator
+    "TaskOrchestrator",
+    "OrchestratorStatus",
+    "StepResult",
+    "TaskResult",
 ]

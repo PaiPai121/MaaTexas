@@ -221,10 +221,11 @@ class VLMPlanner:
 直接返回 JSON，不要任何其他文字：
 {{"thought": "你的思考过程", "target_id": "选中的元素 ID"}}
 
-**注意：**
+**重要说明：**
 - 画面中已经用红色框和编号标注了检测到的 UI 元素
 - 请根据画面内容和用户指令，选择最合适的元素 ID
-- 如果画面中没有合适的元素，target_id 设为 null"""
+- **如果任务已经达成，请返回 `"target_id": null` 并在 `"thought"` 中说明"任务已完成"**
+- 如果画面中没有合适的元素，也请返回 `"target_id": null`"""
 
         # 3. 将图像转换为 base64
         base64_image = self._image_to_base64(perception.annotated_image)
@@ -251,7 +252,7 @@ class VLMPlanner:
 检测到的 UI 元素（共{len(simplified_ui)}个）：
 {json.dumps(simplified_ui, ensure_ascii=False, indent=2)}
 
-请分析画面并选择要交互的元素 ID。"""
+请分析画面并选择要交互的元素 ID。如果任务已完成，请返回 target_id: null。"""
             }
         ]
 

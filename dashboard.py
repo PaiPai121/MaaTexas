@@ -25,6 +25,12 @@ from src.perception import MaaSensor
 from src.perception.models import GameState, PerceptionResult
 from src.planning.models import ActionCommand, ActionType
 from src.planning.vlm_client import VLMPlanner
+from src.planning.orchestrator import (
+    TaskOrchestrator,
+    OrchestratorStatus,
+    StepResult,
+    TaskResult,
+)
 from src.planning.exceptions import PlanningError
 from src.utils.window import enumerate_windows, WindowInfo
 from src.perception.cv_pipeline import FastPerceptionPipeline
@@ -220,6 +226,20 @@ if "latest_command" not in st.session_state:
 if "current_action" not in st.session_state:
     st.session_state.current_action = None
 
+# 自动驾驶模式状态
+if "auto_pilot_mode" not in st.session_state:
+    st.session_state.auto_pilot_mode = False
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = None
+if "orchestrator_status" not in st.session_state:
+    st.session_state.orchestrator_status = OrchestratorStatus.IDLE
+if "orchestrator_steps" not in st.session_state:
+    st.session_state.orchestrator_steps = []
+if "max_auto_steps" not in st.session_state:
+    st.session_state.max_auto_steps = 10
+if "task_running" not in st.session_state:
+    st.session_state.task_running = False
+
 
 def process_user_command(
     command: str,
@@ -265,11 +285,29 @@ def process_user_command(
             st.session_state.command_history[-1]["status"] = "failed"
         return
 
+    # 检查是否为自动驾驶模式
+    if st.session_state.auto_pilot_mode:
+        # 自动驾驶模式：启动任务编排器
+        _run_auto_pilot_task(command, perception, game_state)
+    else:
+        # 单步模式：调用 VLM 生成单步动作
+        _run_single_step(command, perception, game_state)
+
+
+def _run_single_step(
+    command: str,
+    perception: PerceptionResult,
+    game_state: GameState
+) -> None:
+    """单步模式：调用 VLM 生成单步动作。
+
+    Args:
+        command: 用户指令。
+        perception: 感知结果。
+        game_state: 游戏状态。
+    """
     # 显示等待提示
     st.toast("🤖 正在呼叫 VLM 大脑推理中...", icon="🧠")
-
-    # 清空上一次的推理状态
-    st.session_state.current_action = None
 
     # 使用 spinner 显示加载状态
     with st.spinner("🔮 VLM 正在分析画面并生成决策..."):
@@ -302,6 +340,87 @@ def process_user_command(
             st.error(f"❌ 调用失败：{type(e).__name__}: {e}")
             if st.session_state.command_history:
                 st.session_state.command_history[-1]["status"] = "failed"
+
+
+def _run_auto_pilot_task(
+    command: str,
+    perception: PerceptionResult,
+    game_state: GameState
+) -> None:
+    """自动驾驶模式：启动任务编排器执行多步任务。
+
+    Args:
+        command: 用户指令。
+        perception: 感知结果。
+        game_state: 游戏状态。
+    """
+    logger.info(f"启动自动驾驶任务：{command}")
+
+    # 检查是否已有任务在运行
+    if st.session_state.task_running:
+        st.warning("⚠️ 已有任务正在运行，请先停止当前任务")
+        return
+
+    # 获取窗口句柄
+    current_hwnd = st.session_state.get("selected_hwnd", 0)
+
+    # 获取组件实例
+    sensor = get_sensor(current_hwnd)
+    pipeline = get_cv_pipeline()
+    planner = get_planner()
+    executor = ActionExecutor(hwnd=current_hwnd)
+
+    # 创建任务编排器
+    orchestrator = TaskOrchestrator(
+        planner=planner,
+        executor=executor,
+        sensor=sensor,
+        pipeline=pipeline,
+        hwnd=current_hwnd
+    )
+
+    # 设置步骤回调（实时传回 UI）
+    def on_step(step: StepResult) -> None:
+        st.session_state.orchestrator_steps.append(step)
+        logger.info(f"步骤 {step.step_number}: {step.thought[:50]}...")
+
+    def on_status(status: OrchestratorStatus) -> None:
+        st.session_state.orchestrator_status = status
+        logger.info(f"任务状态：{status.value}")
+        if status in [OrchestratorStatus.COMPLETED, OrchestratorStatus.FAILED, OrchestratorStatus.STOPPED]:
+            st.session_state.task_running = False
+
+    orchestrator.set_callbacks(on_step=on_step, on_status=on_status)
+
+    # 保存到 session_state
+    st.session_state.orchestrator = orchestrator
+    st.session_state.orchestrator_status = OrchestratorStatus.RUNNING
+    st.session_state.orchestrator_steps = []
+    st.session_state.task_running = True
+
+    # 显示提示
+    st.info(f"🤖 自动驾驶任务已启动：{command}")
+    st.info(f"最大步数：{st.session_state.max_auto_steps}")
+
+    # 运行任务（同步执行，实际生产环境应该使用线程）
+    try:
+        # 使用 asyncio.run 运行异步任务
+        import asyncio
+        result = asyncio.run(orchestrator.run_task(command, max_steps=st.session_state.max_auto_steps))
+        st.session_state.orchestrator_status = result.status
+
+        if result.status == OrchestratorStatus.COMPLETED:
+            st.success(f"✅ 任务完成！执行了 {len(result.steps)} 步")
+        elif result.status == OrchestratorStatus.FAILED:
+            st.error(f"❌ 任务失败：{result.error_message}")
+        elif result.status == OrchestratorStatus.STOPPED:
+            st.warning("⚠️ 任务被手动停止")
+
+    except Exception as e:
+        logger.error(f"自动驾驶任务异常：{type(e).__name__}: {e}")
+        st.session_state.orchestrator_status = OrchestratorStatus.FAILED
+        st.session_state.task_running = False
+        st.error(f"❌ 任务异常：{type(e).__name__}: {e}")
 
 
 # =============================================================================
@@ -401,6 +520,53 @@ with st.sidebar:
         # 清除传感器缓存
         get_sensor.clear()
         st.rerun()
+
+    st.divider()
+
+    # 自动驾驶模式开关
+    st.subheader("🤖 自动驾驶模式")
+    auto_pilot_mode = st.toggle(
+        "开启自动驾驶模式 (Auto-Pilot)",
+        value=st.session_state.auto_pilot_mode,
+        help="开启后，Agent 将自动循环执行任务直到完成，无需手动点击执行按钮"
+    )
+    st.session_state.auto_pilot_mode = auto_pilot_mode
+
+    if auto_pilot_mode:
+        # 最大步数设置
+        max_auto_steps = st.slider(
+            "最大执行步数",
+            min_value=1,
+            max_value=20,
+            value=st.session_state.max_auto_steps,
+            help="达到最大步数后自动停止"
+        )
+        st.session_state.max_auto_steps = max_auto_steps
+
+        # 任务状态显示
+        status = st.session_state.orchestrator_status
+        status_color = {
+            OrchestratorStatus.IDLE: "⚪",
+            OrchestratorStatus.RUNNING: "🟡",
+            OrchestratorStatus.PAUSED: "🟠",
+            OrchestratorStatus.COMPLETED: "🟢",
+            OrchestratorStatus.FAILED: "🔴",
+            OrchestratorStatus.STOPPED: "⚫"
+        }.get(status, "⚪")
+
+        st.markdown(f"**任务状态：** {status_color} {status.value}")
+
+        if st.session_state.orchestrator_steps:
+            st.markdown(f"**已执行：** {len(st.session_state.orchestrator_steps)} 步 / {st.session_state.max_auto_steps}")
+
+        # 停止按钮
+        if status == OrchestratorStatus.RUNNING:
+            if st.button("⏹️ 停止任务", use_container_width=True, key="stop_task_btn"):
+                if st.session_state.orchestrator:
+                    st.session_state.orchestrator.stop()
+                    st.session_state.orchestrator_status = OrchestratorStatus.STOPPED
+                    st.session_state.task_running = False
+                    st.rerun()
 
     st.divider()
 
@@ -661,19 +827,31 @@ with col2:
                 unsafe_allow_html=True
             )
 
-            # 执行按钮
-            st.divider()
-            if st.button("🕹️ 执行此动作 (Execute)", type="primary", use_container_width=True):
-                with st.spinner("正在向目标窗口发送后台点击指令..."):
-                    executor = ActionExecutor(hwnd=current_hwnd)
-                    success = executor.execute(action_command)
-                    if success:
-                        st.success("✅ 后台动作下发成功！(如果游戏内无反应，可能是游戏引擎屏蔽了虚拟输入)")
-                    else:
-                        st.error("❌ 动作执行失败，请检查控制台日志。")
+            # 执行按钮（仅单步模式显示）
+            if not st.session_state.auto_pilot_mode:
+                st.divider()
+                if st.button("🕹️ 执行此动作 (Execute)", type="primary", use_container_width=True):
+                    with st.spinner("正在向目标窗口发送后台点击指令..."):
+                        executor = ActionExecutor(hwnd=current_hwnd)
+                        success = executor.execute(action_command)
+                        if success:
+                            st.success("✅ 后台动作下发成功！(如果游戏内无反应，可能是游戏引擎屏蔽了虚拟输入)")
+                        else:
+                            st.error("❌ 动作执行失败，请检查控制台日志。")
         else:
             # 无推理任务时的提示
             st.info("💤 暂无推理任务，等待用户下达指令...")
+
+    # 自动驾驶任务步骤展示（如果正在运行）
+    if st.session_state.auto_pilot_mode and st.session_state.orchestrator_steps:
+        st.divider()
+        st.subheader("📋 任务执行步骤")
+
+        for step in st.session_state.orchestrator_steps[-5:]:  # 只显示最近 5 步
+            status_icon = "✅" if step.success else "❌"
+            st.markdown(f"**步骤 {step.step_number}** {status_icon}")
+            st.markdown(f"- 思考：{step.thought[:100]}...")
+            st.markdown(f"- 动作：{step.action_type} -> {step.target_coords}")
 
 
 # =============================================================================
