@@ -859,6 +859,17 @@ with col2:
                 unsafe_allow_html=True
             )
 
+            # 预期变化
+            expected_change = action_command.params.get("expected_change", "未知")
+            st.markdown(
+                f"""
+                <div class="log-entry">
+                    <code>🔮 [预期变化] {expected_change}</code>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
             # 系统执行日志
             coords_str = f"{action_command.target_coords[0]}, {action_command.target_coords[1]}" if action_command.target_coords else "N/A"
             st.markdown(
@@ -894,6 +905,18 @@ with col2:
             status_icon = "✅" if step.success else "❌"
             st.markdown(f"**步骤 {step.step_number}** {status_icon}")
             st.markdown(f"- 思考：{step.thought[:100]}...")
+            
+            # 展示预期变化
+            if " | 验证：" in step.reflection:
+                parts = step.reflection.split(" | 验证：")
+                expected = parts[0]
+                verified = parts[1] if len(parts) > 1 else ""
+                st.markdown(f"- 预期：{expected[:80]}...")
+                verify_icon = "✅" if "成功" in verified or "有效" in verified else "❌"
+                st.markdown(f"- 验证：{verify_icon} {verified[:80]}...")
+            else:
+                st.markdown(f"- 预期：{step.reflection[:80]}...")
+            
             st.markdown(f"- 动作：{step.action_type} -> {step.target_coords}")
 
 

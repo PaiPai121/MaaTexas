@@ -229,13 +229,14 @@ class VLMPlanner:
 
 **输出格式要求：**
 直接返回 JSON，不要任何其他文字：
-{{"thought": "你的思考过程", "target_id": "选中的元素 ID"}}
+{{"thought": "你的思考过程", "target_id": "选中的元素 ID", "expected_change": "执行该操作后画面预期会发生什么变化"}}
 
 **重要说明：**
 - 画面中已经用红色框和编号标注了检测到的 UI 元素
 - 请根据画面内容和用户指令，选择最合适的元素 ID
 - **如果任务已经达成，请返回 `"target_id": null` 并在 `"thought"` 中说明"任务已完成"**
 - 如果画面中没有合适的元素，也请返回 `"target_id": null`
+- **必须填写 `expected_change` 字段，描述执行操作后画面预期的变化**
 {history_hint}"""
 
         # 3. 将图像转换为 base64
@@ -404,3 +405,104 @@ class VLMPlanner:
                 "element_type": target_element.element_type
             }
         )
+
+    def verify_action(
+        self,
+        old_perception: PerceptionResult,
+        new_perception: PerceptionResult,
+        action_taken: ActionCommand
+    ) -> tuple[bool, str, str]:
+        """验证动作是否成功生效。
+
+        让大模型对比操作前后的截图，判断操作是否成功。
+
+        Args:
+            old_perception: 操作前的感知结果。
+            new_perception: 操作后的感知结果。
+            action_taken: 执行的动作。
+
+        Returns:
+            tuple[bool, str, str]: (是否成功，验证结果描述，预期变化)。
+        """
+        try:
+            # 构建验证 Prompt
+            verify_prompt = f"""你是一个二游自动化 Agent 的决策大脑。
+请对比操作前后的游戏画面，判断刚才的操作是否成功生效。
+
+**操作信息：**
+- 动作类型：{action_taken.action_type.value}
+- 目标坐标：{action_taken.target_coords}
+- 预期变化：{action_taken.params.get("expected_change", "未知")}
+
+**操作前画面特征：**
+{self._describe_perception(old_perception)}
+
+**操作后画面特征：**
+{self._describe_perception(new_perception)}
+
+**请回答：**
+1. 画面是否发生了预期变化？（是/否）
+2. 如果否，请描述实际发生了什么变化。
+3. 你认为操作失败的可能原因是什么？
+
+请返回 JSON 格式：
+{{"success": true/false, "verification": "验证结果描述", "reason": "失败原因分析（可选）"}}"""
+
+            # 调用 VLM 进行验证
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个游戏自动化验证助手。请返回 JSON 格式。"},
+                    {"role": "user", "content": verify_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=300,
+                timeout=30
+            )
+
+            # 解析响应
+            response_text = response.choices[0].message.content
+            logger.info(f"验证响应：{response_text}")
+
+            # 简单解析 JSON
+            import json
+            try:
+                result = json.loads(response_text)
+                success = result.get("success", False)
+                verification = result.get("verification", "未知")
+                reason = result.get("reason", "")
+            except json.JSONDecodeError:
+                # 如果不是 JSON，根据关键词判断
+                if "是" in response_text or "success" in response_text.lower():
+                    success = True
+                    verification = response_text[:100]
+                    reason = ""
+                else:
+                    success = False
+                    verification = response_text[:100]
+                    reason = "验证失败"
+
+            expected_change = action_taken.params.get("expected_change", "未知")
+            return success, verification, expected_change
+
+        except Exception as e:
+            logger.error(f"验证失败：{e}")
+            return False, f"验证异常：{e}", action_taken.params.get("expected_change", "未知")
+
+    def _describe_perception(self, perception: PerceptionResult) -> str:
+        """描述感知结果。
+
+        Args:
+            perception: 感知结果。
+
+        Returns:
+            str: 描述文本。
+        """
+        if not perception.ui_elements:
+            return "无明显 UI 元素"
+
+        elements_desc = ", ".join([
+            f"{e.element_id}({e.element_type})"
+            for e in perception.ui_elements[:10]
+        ])
+        return f"检测到 {len(perception.ui_elements)} 个元素：{elements_desc}"

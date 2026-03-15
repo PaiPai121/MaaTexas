@@ -177,6 +177,40 @@ class TaskOrchestrator:
         ])
         return f"检测到 {len(perception.ui_elements)} 个元素：{elements_desc}"
 
+    def _should_retry_micro_adjustment(self, action: ActionCommand) -> bool:
+        """检查是否需要重试微调（连续两次点击同一目标无效）。
+
+        Args:
+            action: 当前动作。
+
+        Returns:
+            bool: 是否需要微调。
+        """
+        if not action.target_coords:
+            return False
+
+        # 检查最近两步是否是同一目标且都失败
+        if len(self.steps_history) < 2:
+            return False
+
+        recent_steps = self.steps_history[-2:]
+        
+        # 检查是否连续两次失败
+        if any(step.success for step in recent_steps):
+            return False
+
+        # 检查是否是同一目标
+        target_ids = [step.action_type for step in recent_steps]
+        if target_ids[0] != target_ids[1]:
+            return False
+
+        # 检查是否都是点击动作
+        if recent_steps[-1].action_type != "click":
+            return False
+
+        logger.info("检测到连续两次点击失败，准备微调坐标")
+        return True
+
     async def _verify_action_effect(
         self,
         before_perception: PerceptionResult,
@@ -312,36 +346,59 @@ class TaskOrchestrator:
                     step_number=self.current_step,
                     thought=action.params.get("thought", "无思考过程"),
                     action_type=action.action_type.value,
-                    target_coords=action.target_coords
+                    target_coords=action.target_coords,
+                    reflection=action.params.get("expected_change", "未知")
                 )
+
+                # 检查是否需要重试微调（连续两次点击同一目标无效）
+                original_target_coords = action.target_coords
+                if self._should_retry_micro_adjustment(action):
+                    # 微调坐标（±5 像素随机偏移）
+                    import random
+                    offset_x = random.randint(-5, 5)
+                    offset_y = random.randint(-5, 5)
+                    adjusted_coords = (
+                        original_target_coords[0] + offset_x,
+                        original_target_coords[1] + offset_y
+                    )
+                    logger.info(f"重试微调：原坐标{original_target_coords} -> 新坐标{adjusted_coords}")
+                    action.target_coords = adjusted_coords
+                    step_result.reflection += f" [微调坐标：{offset_x:+d}, {offset_y:+d}]"
 
                 # e. 调用 executor.execute() 执行动作
                 success = self.executor.execute(action)
                 step_result.executed = True
                 step_result.success = success
 
-                # f. 强制等待 2 秒（等待游戏动画或界面加载）
-                logger.info("等待 2 秒...")
-                await asyncio.sleep(2)
+                # f. 强制等待 1.5 秒（等待游戏动画或界面加载）
+                logger.info("等待 1.5 秒...")
+                await asyncio.sleep(1.5)
 
-                # g. 验证步：再次捕获画面，检查是否产生预期效果
+                # g. 验证步：调用 planner.verify_action() 验证操作是否成功
                 after_frame = self.sensor.capture_frame()
                 if after_frame is not None:
                     after_perception = self.pipeline.process(after_frame)
                     if after_perception:
-                        effective, reflection = await self._verify_action_effect(
+                        # 使用 VLM 进行验证
+                        verify_success, verification_result, expected_change = await self.planner.verify_action(
                             before_perception,
                             after_perception,
                             action
                         )
-                        step_result.reflection = reflection
-                        step_result.success = step_result.success and effective
+                        
+                        step_result.reflection += f" | 验证：{verification_result}"
+                        step_result.success = step_result.success and verify_success
 
-                        if not effective:
+                        if not verify_success:
                             self.consecutive_failures += 1
-                            logger.warning(f"连续失败次数：{self.consecutive_failures}")
+                            logger.warning(f"验证失败，连续失败次数：{self.consecutive_failures}")
+                            logger.info(f"预期变化：{expected_change}")
                         else:
                             self.consecutive_failures = 0
+                            logger.info(f"验证成功：{verification_result}")
+
+                # 恢复原始坐标（用于记录）
+                action.target_coords = original_target_coords
 
                 # 记录到历史
                 self.steps_history.append(step_result)
