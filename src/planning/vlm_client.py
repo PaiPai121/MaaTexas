@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from src.perception.models import PerceptionResult, GameState, UIElement
-from src.planning.models import ActionCommand, ActionType
+from src.planning.models import ActionCommand, ActionType, MemoryEntry
 from src.planning.exceptions import PlanningError
 
 # 加载环境变量
@@ -195,7 +195,8 @@ class VLMPlanner:
         self,
         perception: PerceptionResult,
         game_state: GameState,
-        user_command: str
+        user_command: str,
+        history: Optional[list[MemoryEntry]] = None
     ) -> ActionCommand:
         """根据感知结果和游戏状态生成行为命令。
 
@@ -203,6 +204,7 @@ class VLMPlanner:
             perception: 感知管线输出结果（包含标注图像和 UI 元素）。
             game_state: 当前游戏状态。
             user_command: 用户自然语言指令。
+            history: 历史记忆列表，用于反思和学习。
 
         Returns:
             ActionCommand: 生成的行为命令（通常是点击操作）。
@@ -213,8 +215,16 @@ class VLMPlanner:
         # 1. 数据精简 - 构建 UI 元素简化列表
         simplified_ui = self._simplify_ui_elements(perception.ui_elements)
 
-        # 2. 组装 System Prompt
-        system_prompt = """你是一个二游自动化 Agent 的决策大脑（视觉多模态）。
+        # 2. 组装 System Prompt（增加历史反思指令）
+        history_hint = ""
+        if history:
+            recent_failures = [h for h in history[-5:] if not h.success]
+            if recent_failures:
+                history_hint = "\n\n**历史反思：**\n"
+                for h in recent_failures:
+                    history_hint += f"- 你之前尝试过点击 {h.target_element_id} 但{h.reflection}，这次请尝试不同的策略。\n"
+
+        system_prompt = f"""你是一个二游自动化 Agent 的决策大脑（视觉多模态）。
 你的任务是根据当前游戏画面和用户需求，选择最合适的 UI 元素进行交互。
 
 **输出格式要求：**
@@ -225,7 +235,8 @@ class VLMPlanner:
 - 画面中已经用红色框和编号标注了检测到的 UI 元素
 - 请根据画面内容和用户指令，选择最合适的元素 ID
 - **如果任务已经达成，请返回 `"target_id": null` 并在 `"thought"` 中说明"任务已完成"**
-- 如果画面中没有合适的元素，也请返回 `"target_id": null`"""
+- 如果画面中没有合适的元素，也请返回 `"target_id": null`
+{history_hint}"""
 
         # 3. 将图像转换为 base64
         base64_image = self._image_to_base64(perception.annotated_image)

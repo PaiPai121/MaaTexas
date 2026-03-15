@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from src.perception import MaaSensor
 from src.perception.models import GameState, PerceptionResult
-from src.planning.models import ActionCommand, ActionType
+from src.planning.models import ActionCommand, ActionType, MemoryEntry
 from src.planning.vlm_client import VLMPlanner
 from src.planning.orchestrator import (
     TaskOrchestrator,
@@ -31,6 +31,7 @@ from src.planning.orchestrator import (
     StepResult,
     TaskResult,
 )
+from src.planning.memory_manager import MemoryManager
 from src.planning.exceptions import PlanningError
 from src.utils.window import enumerate_windows, WindowInfo
 from src.perception.cv_pipeline import FastPerceptionPipeline
@@ -240,6 +241,14 @@ if "max_auto_steps" not in st.session_state:
 if "task_running" not in st.session_state:
     st.session_state.task_running = False
 
+# 记忆管理器（全局单例）
+@st.cache_resource
+def get_memory_manager() -> MemoryManager:
+    """获取或创建记忆管理器单例。"""
+    return MemoryManager(memory_file="experience.json", max_memory_size=100)
+
+memory_manager = get_memory_manager()
+
 
 def process_user_command(
     command: str,
@@ -370,13 +379,15 @@ def _run_auto_pilot_task(
     planner = get_planner()
     executor = ActionExecutor(hwnd=current_hwnd)
 
-    # 创建任务编排器
+    # 创建任务编排器（带记忆管理器）
     orchestrator = TaskOrchestrator(
         planner=planner,
         executor=executor,
         sensor=sensor,
         pipeline=pipeline,
-        hwnd=current_hwnd
+        memory_manager=memory_manager,
+        hwnd=current_hwnd,
+        stuck_threshold=3  # 连续 3 次失败认为陷入困境
     )
 
     # 设置步骤回调（实时传回 UI）
@@ -754,6 +765,7 @@ with col2:
     tabs = ["GameState", "Action"]
     if perception_result is not None:
         tabs.append("Perception")
+    tabs.append("🧠 记忆库")
 
     tab_objects = st.tabs(tabs)
 
@@ -795,6 +807,37 @@ with col2:
                 st.json({"ui_elements": ui_data, "count": len(ui_data)})
             else:
                 st.info("未检测到 UI 元素")
+
+    # 记忆库 Tab
+    with tab_objects[3]:
+        st.markdown("**🧠 记忆库**")
+
+        # 知识地图展示
+        km = memory_manager.knowledge_map
+        if km.ui_knowledge:
+            st.markdown(f"**UI 知识** ({len(km.ui_knowledge)} 个元素)")
+            for elem_id, info in list(km.ui_knowledge.items())[:10]:
+                st.markdown(f"- `{elem_id}`: {info.get('function', '未知')} (置信度：{info.get('confidence', 0):.2f})")
+
+        # 失败模式展示
+        if km.failure_patterns:
+            st.markdown(f"**失败模式** ({len(km.failure_patterns)} 条)")
+            for pattern in km.failure_patterns[-5:]:
+                st.markdown(f"- `{pattern['element_id']}` + {pattern['action_type']}: {pattern['reason']}")
+
+        # 历史记忆展示
+        recent_memories = memory_manager.get_recent_memories(count=5)
+        if recent_memories:
+            st.markdown(f"**历史记忆** ({len(recent_memories)} 条)")
+            for mem in recent_memories:
+                icon = "✅" if mem.success else "❌"
+                st.markdown(f"{icon} **{mem.user_command}** - {mem.reflection[:50]}...")
+
+        # 清空记忆按钮
+        if st.button("🗑️ 清空记忆", use_container_width=True):
+            memory_manager.clear()
+            st.success("记忆已清空")
+            st.rerun()
 
     # 下部：LLM Reasoning（推理日志）
     st.subheader("🧠 LLM Reasoning")

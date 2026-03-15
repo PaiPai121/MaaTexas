@@ -104,3 +104,49 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class MemoryEntry(BaseModel):
+    """记忆条目数据契约。
+
+    记录 Agent 的历史操作和反思，用于自我学习和改进。
+
+    Attributes:
+        timestamp: 记忆创建时间。
+        user_command: 用户原始指令。
+        action_type: 执行的动作类型。
+        target_element_id: 点击的目标元素 ID。
+        target_coords: 执行的目标坐标。
+        before_scene_desc: 执行前的画面特征描述。
+        after_scene_desc: 执行后的画面特征描述。
+        success: 执行结果（成功/失败）。
+        reflection: 反思总结（如"原地踏步"、"有效操作"等）。
+        lesson_learned: 学到的教训或经验。
+    """
+    timestamp: datetime = Field(default_factory=datetime.now, description="记忆创建时间")
+    user_command: str = Field(..., description="用户原始指令")
+    action_type: str = Field(..., description="执行的动作类型")
+    target_element_id: Optional[str] = Field(default=None, description="目标元素 ID")
+    target_coords: Optional[tuple[int, int]] = Field(default=None, description="目标坐标")
+    before_scene_desc: str = Field(default="", description="执行前画面特征")
+    after_scene_desc: str = Field(default="", description="执行后画面特征")
+    success: bool = Field(default=False, description="执行结果")
+    reflection: str = Field(default="", description="反思总结")
+    lesson_learned: str = Field(default="", description="学到的教训")
+
+    class Config:
+        """Pydantic 模型配置。"""
+        json_schema_extra = {
+            "example": {
+                "timestamp": "2026-03-12T10:00:00",
+                "user_command": "领取邮件",
+                "action_type": "click",
+                "target_element_id": "ui_3",
+                "target_coords": (500, 300),
+                "before_scene_desc": "主界面，右上角有邮件红点",
+                "after_scene_desc": "邮件界面打开，显示未领取列表",
+                "success": True,
+                "reflection": "有效操作，成功进入邮件界面",
+                "lesson_learned": "邮件红点是可交互元素"
+            }
+        }
