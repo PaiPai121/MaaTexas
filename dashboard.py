@@ -83,6 +83,24 @@ st.markdown("""
         border-radius: 4px;
         margin: 4px 0;
     }
+    .log-entry-decision {
+        font-family: 'Consolas', monospace;
+        font-size: 0.9rem;
+        background-color: #e3f2fd;
+        padding: 8px;
+        border-radius: 4px;
+        margin: 4px 0;
+        border-left: 4px solid #2196f3;
+    }
+    .log-entry-reflection {
+        font-family: 'Consolas', monospace;
+        font-size: 0.9rem;
+        background-color: #fff3e0;
+        padding: 8px;
+        border-radius: 4px;
+        margin: 4px 0;
+        border-left: 4px solid #ff9800;
+    }
     .status-indicator {
         display: inline-block;
         width: 10px;
@@ -904,18 +922,41 @@ with col2:
         for step in st.session_state.orchestrator_steps[-5:]:  # 只显示最近 5 步
             status_icon = "✅" if step.success else "❌"
             st.markdown(f"**步骤 {step.step_number}** {status_icon}")
-            st.markdown(f"- 思考：{step.thought[:100]}...")
             
-            # 展示预期变化
-            if " | 验证：" in step.reflection:
-                parts = step.reflection.split(" | 验证：")
+            # 决策思考（蓝色背景）
+            st.markdown(
+                f"""
+                <div class="log-entry-decision">
+                    <code>🧠 [决策思考] {step.thought[:100]}...</code>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # 展示预期变化和验证结论（橙色背景）
+            if " | 验证结论：" in step.reflection:
+                parts = step.reflection.split(" | 验证结论：")
                 expected = parts[0]
                 verified = parts[1] if len(parts) > 1 else ""
-                st.markdown(f"- 预期：{expected[:80]}...")
-                verify_icon = "✅" if "成功" in verified or "有效" in verified else "❌"
-                st.markdown(f"- 验证：{verify_icon} {verified[:80]}...")
+                
+                st.markdown(
+                    f"""
+                    <div class="log-entry-reflection">
+                        <code>🔮 [预期] {expected[:80]}...</code><br/>
+                        <code>✅ [验证结论] {verified[:120]}...</code>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
             else:
-                st.markdown(f"- 预期：{step.reflection[:80]}...")
+                st.markdown(
+                    f"""
+                    <div class="log-entry-reflection">
+                        <code>🔮 [预期] {step.reflection[:80]}...</code>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
             
             st.markdown(f"- 动作：{step.action_type} -> {step.target_coords}")
 

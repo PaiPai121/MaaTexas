@@ -177,6 +177,61 @@ class TaskOrchestrator:
         ])
         return f"检测到 {len(perception.ui_elements)} 个元素：{elements_desc}"
 
+    async def _identify_scene(
+        self,
+        perception: PerceptionResult,
+        user_command: str
+    ) -> str:
+        """识别当前场景（场景认知）。
+
+        让 VLM 根据画面特征判断当前处于什么场景。
+
+        Args:
+            perception: 感知结果。
+            user_command: 用户指令。
+
+        Returns:
+            str: 场景名称（如"主界面"、"商店"、"加载中"等）。
+        """
+        try:
+            scene_prompt = f"""你是一个游戏自动化 Agent，请根据画面特征判断当前场景。
+
+**画面特征：**
+{self._describe_scene(perception)}
+
+**用户指令：**
+{user_command}
+
+**可能的场景：**
+- 主界面（通常有开始游戏、设置等按钮）
+- 商店界面（有商品列表、购买按钮）
+- 战斗界面（有血量、技能按钮）
+- 加载界面（有进度条或 loading 标志）
+- 结算界面（有奖励、继续按钮）
+- 邮件界面（有邮件列表、领取按钮）
+- 其他界面
+
+请返回场景名称（只返回一个词）："""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是场景识别助手。只返回场景名称。"},
+                    {"role": "user", "content": scene_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=20,
+                timeout=15
+            )
+
+            scene = response.choices[0].message.content.strip()
+            logger.info(f"场景识别：{scene}")
+            return scene
+
+        except Exception as e:
+            logger.error(f"场景识别失败：{e}")
+            return "未知"
+
     def _should_retry_micro_adjustment(self, action: ActionCommand) -> bool:
         """检查是否需要重试微调（连续两次点击同一目标无效）。
 
@@ -319,12 +374,26 @@ class TaskOrchestrator:
 
                 before_scene_desc = self._describe_scene(before_perception)
 
-                # 构建游戏状态
+                # 场景认知：识别当前场景
+                current_scene = await self._identify_scene(before_perception, user_command)
+                logger.info(f"当前场景：{current_scene}")
+
+                # 构建游戏状态（带场景认知）
                 game_state = GameState(
-                    current_scene="unknown",
+                    current_scene=current_scene,
                     hp_percent=100.0,
                     sanity_percent=100.0
                 )
+
+                # 添加失败上下文到历史记忆
+                if self.consecutive_failures > 0:
+                    failure_context = f"\n\n**失败上下文：** 连续{self.consecutive_failures}次操作失败，请调整策略。"
+                    # 在下一轮决策时强制要求 VLM 针对失败进行修正
+                    memory_entries.append(MemoryEntry(
+                        user_command=f"修正策略（连续{self.consecutive_failures}次失败）",
+                        action_type="context",
+                        reflection=f"需要调整策略，可能是：坐标微调、等待更久、或元素不可用"
+                    ))
 
                 # c. 调用 planner.generate_action() 获取下一步动作（传入历史记忆）
                 action = self.planner.generate_action(
@@ -374,28 +443,50 @@ class TaskOrchestrator:
                 logger.info("等待 1.5 秒...")
                 await asyncio.sleep(1.5)
 
-                # g. 验证步：调用 planner.verify_action() 验证操作是否成功
+                # g. 验证闭环：再次捕获画面并调用 VLM 验证
                 after_frame = self.sensor.capture_frame()
                 if after_frame is not None:
                     after_perception = self.pipeline.process(after_frame)
                     if after_perception:
-                        # 使用 VLM 进行验证
-                        verify_success, verification_result, expected_change = await self.planner.verify_action(
+                        # 使用 VLM 进行验证（带反思分析）
+                        expected_change = action.params.get("expected_change", "未知")
+                        verify_success, conclusion, reason_analysis = await self.planner.verify_action_success(
                             before_perception,
                             after_perception,
-                            action
+                            action,
+                            expected_change
                         )
+
+                        # 记录验证结论
+                        step_result.reflection += f" | 验证结论：{conclusion}"
+                        if reason_analysis:
+                            step_result.reflection += f" | {reason_analysis}"
                         
-                        step_result.reflection += f" | 验证：{verification_result}"
                         step_result.success = step_result.success and verify_success
 
                         if not verify_success:
                             self.consecutive_failures += 1
-                            logger.warning(f"验证失败，连续失败次数：{self.consecutive_failures}")
-                            logger.info(f"预期变化：{expected_change}")
+                            logger.warning(f"验证失败：{conclusion}")
+                            logger.warning(f"原因分析：{reason_analysis}")
+                            logger.warning(f"连续失败次数：{self.consecutive_failures}")
+                            
+                            # 检查是否陷入困境（连续 3 次原地踏步）
+                            if self.consecutive_failures >= 3:
+                                logger.error("任务陷入困境，连续 3 次验证失败")
+                                # 将失败原因记录到 session_state 供 Dashboard 展示
+                                import streamlit as st
+                                if "last_failure_reason" in st.session_state:
+                                    st.session_state.last_failure_reason = f"连续{self.consecutive_failures}次失败：{conclusion}"
                         else:
                             self.consecutive_failures = 0
-                            logger.info(f"验证成功：{verification_result}")
+                            logger.info(f"验证成功：{conclusion}")
+                            
+                            # 验证成功：将经验存入 ExperienceOracle
+                            self.memory_manager.knowledge_map.update_ui_knowledge(
+                                element_id=action.params.get("target_id", "unknown"),
+                                function=conclusion[:50],
+                                confidence=0.9
+                            )
 
                 # 恢复原始坐标（用于记录）
                 action.target_coords = original_target_coords

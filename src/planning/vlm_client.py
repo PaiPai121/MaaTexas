@@ -406,47 +406,101 @@ class VLMPlanner:
             }
         )
 
-    def verify_action(
+    def verify_action_success(
         self,
-        old_perception: PerceptionResult,
-        new_perception: PerceptionResult,
-        action_taken: ActionCommand
+        pre_perception: PerceptionResult,
+        post_perception: PerceptionResult,
+        action_taken: ActionCommand,
+        expected_change: str
     ) -> tuple[bool, str, str]:
-        """验证动作是否成功生效。
+        """验证动作是否成功生效（带反思分析）。
 
-        让大模型对比操作前后的截图，判断操作是否成功。
+        将操作前后的 SoM 标注图同时发给 VLM，让它对比并分析是否成功。
 
         Args:
-            old_perception: 操作前的感知结果。
-            new_perception: 操作后的感知结果。
+            pre_perception: 操作前的感知结果（含 SoM 标注）。
+            post_perception: 操作后的感知结果（含 SoM 标注）。
             action_taken: 执行的动作。
+            expected_change: 预期的画面变化。
 
         Returns:
-            tuple[bool, str, str]: (是否成功，验证结果描述，预期变化)。
+            tuple[bool, str, str]: (是否成功，验证结论，失败原因分析)。
         """
         try:
             # 构建验证 Prompt
-            verify_prompt = f"""你是一个二游自动化 Agent 的决策大脑。
-请对比操作前后的游戏画面，判断刚才的操作是否成功生效。
+            verify_prompt = f"""你是一个二游自动化 Agent 的决策大脑，具备自我反思能力。
+
+请对比操作前后的游戏画面（已标注 SoM），判断刚才的操作是否成功生效。
 
 **操作信息：**
 - 动作类型：{action_taken.action_type.value}
 - 目标坐标：{action_taken.target_coords}
-- 预期变化：{action_taken.params.get("expected_change", "未知")}
+- 预期变化：{expected_change}
 
-**操作前画面特征：**
-{self._describe_perception(old_perception)}
+**操作前画面（SoM 标注）：**
+{self._describe_perception(pre_perception)}
 
-**操作后画面特征：**
-{self._describe_perception(new_perception)}
+**操作后画面（SoM 标注）：**
+{self._describe_perception(post_perception)}
 
-**请回答：**
-1. 画面是否发生了预期变化？（是/否）
-2. 如果否，请描述实际发生了什么变化。
-3. 你认为操作失败的可能原因是什么？
+**请反思并回答：**
+1. 画面是否发生了预期变化？（成功/失败/原地踏步）
+2. 如果失败，请分析原因：
+   - 是否点偏了？（坐标需要微调）
+   - 是否响应慢？（需要等待更久）
+   - 是否需要重试？（可能是网络或动画问题）
+   - 是否元素不可用？（按钮灰化或被遮挡）
+3. 你建议下一步如何调整策略？
 
 请返回 JSON 格式：
-{{"success": true/false, "verification": "验证结果描述", "reason": "失败原因分析（可选）"}}"""
+{{"success": true/false, "conclusion": "验证结论", "reason": "失败原因分析", "suggestion": "调整建议"}}"""
+
+            # 调用 VLM 进行验证
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个游戏自动化验证助手，具备反思能力。请返回 JSON 格式。"},
+                    {"role": "user", "content": verify_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=400,
+                timeout=45
+            )
+
+            # 解析响应
+            response_text = response.choices[0].message.content
+            logger.info(f"验证响应：{response_text}")
+
+            # 解析 JSON
+            import json
+            try:
+                result = json.loads(response_text)
+                success = result.get("success", False)
+                conclusion = result.get("conclusion", "未知")
+                reason = result.get("reason", "")
+                suggestion = result.get("suggestion", "")
+                
+                # 检测"原地踏步"关键词
+                if "原地踏步" in conclusion or "无变化" in conclusion:
+                    success = False
+            except json.JSONDecodeError:
+                # 如果不是 JSON，根据关键词判断
+                if "成功" in response_text or "是" in response_text:
+                    success = True
+                    conclusion = response_text[:150]
+                    reason = ""
+                    suggestion = ""
+                else:
+                    success = False
+                    conclusion = response_text[:150]
+                    reason = "验证失败"
+                    suggestion = "建议重试或调整策略"
+
+            return success, conclusion, f"{reason} | 建议：{suggestion}"
+
+        except Exception as e:
+            logger.error(f"验证失败：{e}")
+            return False, f"验证异常：{e}", "无法分析原因"
 
             # 调用 VLM 进行验证
             response = self.client.chat.completions.create(
